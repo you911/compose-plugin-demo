@@ -10,7 +10,7 @@ View方式也可以实现本文的功能，但是View绘制效率低，性能差
 2. 创建插件项目：在项目里新增module,我这里命名为plugin了，在项目根目录gradle.properties文件中新增变量配置`runAlone=true`用于配置管理plugin是否可以独立运行
 3. 修改plugin模块的gradle配置如下：
 
-```kotlin
+```
 plugins {
     id 'org.jetbrains.kotlin.android'
 }
