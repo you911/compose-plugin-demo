@@ -320,7 +320,37 @@ val canSkipExecution = buildPreambleStatementsAndReturnIfSkippingPossible(
 
 ```
 
-这里的dirty就是编译生成的int参数,方法中有多处scope.allTrackedParams的调用，这是我们声明函数时的参数，上面的代码中涉及到一个很关键的函数"
+这里的dirty就是编译生成的int参数，注意，此处根据参数数量，有可能会有多个int参数。生成逻辑在irCopyToTemporary方法中，方法如下:
+```kotlin
+override fun irCopyToTemporary(
+            nameHint: String?,
+            isVar: Boolean,
+            exactName: Boolean
+        ): IrChangedBitMaskVariable {
+            used = true
+            val temps = params.mapIndexed { index, param ->
+                IrVariableImpl(
+                    UNDEFINED_OFFSET,
+                    UNDEFINED_OFFSET,
+                    // We label "dirty" as a defined variable instead of a temporary, so that it
+                    // is properly stored in the locals table and discoverable by debuggers. The
+                    // dirty variable encodes information that could be useful for tooling to
+                    // interpret.
+                    IrDeclarationOrigin.DEFINED,
+                    IrVariableSymbolImpl(),
+                    Name.identifier(if (index == 0) "\$dirty" else "\$dirty$index"),
+                    param.type,
+                    isVar,
+                    isConst = false,
+                    isLateinit = false
+                ).apply {
+                    initializer = irGet(param)
+                }
+            }
+            return IrChangedBitMaskVariableImpl(temps, count)
+        }
+```
+方法中有多处scope.allTrackedParams的调用，这是我们声明函数时的参数，上面的代码中涉及到一个很关键的函数"
 buildPreambleStatementsAndReturnIfSkippingPossible"，我们看下这个方法内容：
 
 ```kotlin
@@ -428,5 +458,5 @@ enum class ParamState(val bits: Int) {
 
 ```
 
-有了这个类，我们就可以在插件化合理的调用插件代码了。但是按这个类中数据的构成，最多存储10个参数的变化情况，所以，参数大于10个的情况呢？
+有了这个类，我们就可以在插件化合理的调用插件代码了。
 
