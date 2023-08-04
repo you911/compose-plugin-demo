@@ -1,3 +1,7 @@
+## 写在前面
+
+对Composable编译期处理的源码阅读相关验证和文档请切换到param分支。
+
 ## 什么是Compose
 
 Jetpack Compose是谷歌官方推荐的Android UI实现方式，避免了Android传统View在绘制、编写、性能等方面的种种缺点，具体使用方法请参考官方文档。
