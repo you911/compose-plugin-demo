@@ -1,8 +1,8 @@
 # 编译器对Composable函数做了什么
 
-知道Composable和suspend一样，在编译期做了处理，但是没并没深入研究，在研究Composable实现插件化中，反射获取插件中的Composable函数时发现Composable函数多了两个参数（多出的参数数量>
-=2个，与组件参数有关，下面会提到)
-, 想必Compose的重组与这两个参数有着密切联系，让我们一起研究一下。
+在研究Composable实现插件化中，反射获取插件中的Composable函数时发现Composable函数多了两个参数（多出的参数数量>
+=2个，与组件参数有关，下面会提到)想必Compose的重组与这两个参数有着密切联系，让我们一起研究一下。
+<br />**注意！：经过查看源码，发现不一定会有Composer参数，详见“编译期间Composable字节码处理”小节**，
 
 ## 普通函数
 
@@ -236,189 +236,16 @@ public final class ComposeParamKt {
 
 WTF!
 也是0？这样逆推下去，哪怕有规律也不一定靠谱，对比AndroidView的项目，不难发现编译实现Composable转化的过程应该就在org.jetbrains.kotlin.android这一插件中，我们直接看插件源码吧。[插件源码地址](git@github.com:JetBrains/android.git)<br />
-源码的module有点多，我就不放截图了，根据module名字就可以看出compose相关的插件是在compose-ide-plugin中。插件要对字节码离不开transform,我们重点查找这类代码，在androidx.compose.compiler.plugins.kotlin.lower.ComposableTargetAnnotationsTransformer就是关键代码。方便大家
-[这里直接放下这个类的url](https://github.com/JetBrains/android/blob/master/compose-ide-plugin/compiler-hosted-src/androidx/compose/compiler/plugins/kotlin/lower/ComposableFunctionBodyTransformer.kt)
-<br />代码比较多，但是逻辑是很清晰的，visitFunctionInScope就是这块关键业务的切入口。代码如下:
+源码的module有点多，我就不放截图了，根据module名字就可以看出compose相关的插件是在compose-ide-plugin中。插件要对字节码离不开transform,我们重点查找这类代码，在androidx.compose.compiler.plugins.kotlin.lower.ComposableFunctionBodyTransformer就是关键代码。方便大家
+查看[这里直接放下这个类的url](https://github.com/JetBrains/android/blob/master/compose-ide-plugin/compiler-hosted-src/androidx/compose/compiler/plugins/kotlin/lower/ComposableFunctionBodyTransformer.kt)
+
+首先看到的就是ParamState，结合注释，我们不难发现，这是与Composable和$changed值有关。我们看下这个枚举类定义：
 
 ```kotlin
- @OptIn(ObsoleteDescriptorBasedAPI::class)
-private fun visitFunctionInScope(declaration: IrFunction): IrStatement {
-    val scope = currentFunctionScope
-    // if the function isn't composable, there's nothing to do
-    if (!scope.isComposable) return super.visitFunction(declaration)
-    val restartable = declaration.shouldBeRestartable()
-    val isLambda = declaration.isLambda()
-
-    val isTracked = declaration.returnType.isUnit()
-
-    if (declaration.body == null) return declaration
-
-    val changedParam = scope.changedParameter!!
-    val defaultParam = scope.defaultParameter
-
-    // restartable functions get extra logic and different types of groups from
-    // non-restartable functions, and lambdas get no groups at all.
-    return when {
-        isLambda && isTracked -> visitComposableLambda(
-            declaration,
-            scope,
-            changedParam
-        )
-        restartable && isTracked -> visitRestartableComposableFunction(
-            declaration,
-            scope,
-            changedParam,
-            defaultParam
-        )
-        else -> visitNonRestartableComposableFunction(
-            declaration,
-            scope,
-            changedParam,
-            defaultParam
-        )
-    }
-}
-```
-
-阅读源码发现Composable的lambda表达式还单独处理了，这点我之前是不知道的。这块的区别等有时间好好研究下。我们先看看visitComposableLambda里怎么处理的：
-
-```kotlin
-  // we start off assuming that we *can* skip execution of the function
-var canSkipExecution = declaration.returnType.isUnit() &&
-        scope.allTrackedParams.none { stabilityOf(it.type).knownUnstable() }
-
-// if the function can never skip, or there are no parameters to test, then we
-// don't need to have the dirty parameter locally since it will never be different from
-// the passed in `changed` parameter.
-val dirty = if (canSkipExecution && scope.allTrackedParams.isNotEmpty())
-// NOTE(lmr): Technically, dirty is a mutable variable, but we don't want to mark it
-// as one since that will cause a `Ref<Int>` to get created if it is captured. Since
-// we know we will never be mutating this variable _after_ it gets captured, we can
-// safely mark this as `isVar = false`.
-    changedParam.irCopyToTemporary(
-        // LLVM validation doesn't allow us to have val here.
-        isVar = !(context.platform.isJvm() || context.platform.isJs()),
-        nameHint = "\$dirty",
-        exactName = true
-    )
-else
-    changedParam
-
-scope.dirty = dirty
-//省略...
-val canSkipExecution = buildPreambleStatementsAndReturnIfSkippingPossible(
-    body,
-    skipPreamble,
-    bodyPreamble,
-    isSkippableDeclaration = true, // we start off assuming that we *can* skip execution of the function
-    scope,
-    dirty,
-    changedParam,
-    defaultParam,
-    defaultScope,
-)
-
-```
-
-这里的dirty就是编译生成的int参数，注意，此处根据参数数量，有可能会有多个int参数。生成逻辑在irCopyToTemporary方法中，方法如下:
-```kotlin
-override fun irCopyToTemporary(
-            nameHint: String?,
-            isVar: Boolean,
-            exactName: Boolean
-        ): IrChangedBitMaskVariable {
-            used = true
-            val temps = params.mapIndexed { index, param ->
-                IrVariableImpl(
-                    UNDEFINED_OFFSET,
-                    UNDEFINED_OFFSET,
-                    // We label "dirty" as a defined variable instead of a temporary, so that it
-                    // is properly stored in the locals table and discoverable by debuggers. The
-                    // dirty variable encodes information that could be useful for tooling to
-                    // interpret.
-                    IrDeclarationOrigin.DEFINED,
-                    IrVariableSymbolImpl(),
-                    Name.identifier(if (index == 0) "\$dirty" else "\$dirty$index"),
-                    param.type,
-                    isVar,
-                    isConst = false,
-                    isLateinit = false
-                ).apply {
-                    initializer = irGet(param)
-                }
-            }
-            return IrChangedBitMaskVariableImpl(temps, count)
-        }
-```
-方法中有多处scope.allTrackedParams的调用，这是我们声明函数时的参数，上面的代码中涉及到一个很关键的函数"
-buildPreambleStatementsAndReturnIfSkippingPossible"，我们看下这个方法内容：
-
-```kotlin
-      val parameters = scope.allTrackedParams
-//省略...
-parameters.forEachIndexed { slotIndex, param ->
-    // varargs get handled separately because they will require their own groups
-    if (param.isVararg) return@forEachIndexed
-    val defaultIndex = scope.defaultIndexForSlotIndex(slotIndex)
-    val defaultValue = param.defaultValue
-    val isUnstable = stabilities[slotIndex].knownUnstable()
-    val isUsed = scope.usedParams[slotIndex]
-
-    when {
-        !mightSkip || !isUsed -> {
-            // nothing to do
-        }
-        dirty !is IrChangedBitMaskVariable -> {
-            // this will only ever be true when mightSkip is false, but we put this
-            // branch here so that `dirty` gets smart cast in later branches
-        }
-        isUnstable && defaultParam != null && defaultValue != null -> {
-            // if it has a default parameter then the function can still potentially skip
-            skipPreamble.statements.add(
-                irIf(
-                    condition = irGetBit(defaultParam, defaultIndex),
-                    body = dirty.irOrSetBitsAtSlot(
-                        slotIndex,
-                        irConst(ParamState.Same.bitsForSlot(slotIndex))
-                    )
-                )
-            )
-        }
-        !isUnstable -> {
-            val defaultValueIsStatic = defaultExprIsStatic[slotIndex]
-            val callChanged = irChanged(irGet(param))
-            val isChanged = if (defaultParam != null && !defaultValueIsStatic)
-                irAndAnd(irIsProvided(defaultParam, slotIndex), callChanged)
-            else
-                callChanged
-            val modifyDirtyFromChangedResult = dirty.irOrSetBitsAtSlot(
-                slotIndex,
-                irIfThenElse(
-                    context.irBuiltIns.intType,
-                    isChanged,
-                    // if the value has changed, update the bits in the slot to be
-                    // "Different"
-                    thenPart = irConst(ParamState.Different.bitsForSlot(slotIndex)),
-                    // if the value has not changed, update the bits in the slot to
-                    // be "Same"
-                    elsePart = irConst(ParamState.Same.bitsForSlot(slotIndex))
-                )
-                //省略...
-            )
-            //省略...
-        }
-        //省略...
-    }
-
-}
-```
-
-方法体太长了，省略了很多代码，感兴趣的小伙伴可以自己看一下。
-<br />这段方法在参数不同情况下，做编译生成的参数（dirty）做了调整，在生成的int参数中，按位记录了哪个参数是否发生变化了。
-<br />skipPreamble.statements.add是动态添加了代码块，也就是前文中我们看到的反编译后比kotlin中声明函数多出来的if判断代码块。
-<br />这里涉及到一个类ParamState，结合注释，我们不难发现，这是不同情况下的dirty值。我们看下这个枚举类定义：
-
-```kotlin
+/**
+ * An enum of the different "states" a parameter of a composable function can have relating to
+ * comparison propagation. Each state is represented by two bits in the `$changed` bitmask.
+ */
 enum class ParamState(val bits: Int) {
     /**
      * Indicates that nothing is certain about the current state of the parameter. It could be
@@ -457,6 +284,202 @@ enum class ParamState(val bits: Int) {
 }
 
 ```
-
-有了这个类，我们就可以在插件化合理的调用插件代码了。
-
+根据注释，每个状态由“$changed”按位表示,在调用处会根据插件分析的参数情况，设置适当的值。但是根据前文，我们反编译发现多出的是Composer和int参数，如果按位，实际上一个int参数最多才表示声明Composable函数时0~10个参数的情况，那么参数大于10个呢？我们继续往下看：
+```kotlin
+const val SLOTS_PER_INT = 10
+/**
+ * Calculates the number of 'changed' params needed based on the function's parameters.
+ *
+ * @param realValueParams The number of params defined by the user, those that are not implicit
+ * (no extension or context receivers) or synthetic (no %composer, %changed or %defaults).
+ * @param thisParams The number of implicit params, i.e. [IrFunction.thisParamCount]
+ */
+fun changedParamCount(realValueParams: Int, thisParams: Int): Int {
+    val totalParams = realValueParams + thisParams
+    if (totalParams == 0) return 1 // There is always at least 1 changed param
+    return ceil(
+        totalParams.toDouble() / SLOTS_PER_INT.toDouble()
+    ).toInt()
+}
+```
+这里会根据声明参数数量计算字节码操纵后的参数数量，可以看到最起码会有1个changed参数。
+有了这个类，我们就可以在[Compose实现插件化](https://juejin.cn/post/7262219723294900282)中合理的调用插件代码了。
+<br />但是这就完了吗？没有！我们看下插件对函数的处理。
+### 编译期间Composable字节码处理
+附上一段原文方法注释内容，这里概述了编译插件对Composable函数的处理。
+```
+/**
+ * This IR Transform is responsible for the main transformations of the body of a composable
+ * function.
+ *
+ * 1. Control-Flow Group Generation
+ * 2. Default arguments
+ * 3. Composable Function Skipping
+ * 4. Comparison Propagation
+ * 5. Recomposability
+ * 6. Source location information (when enabled)
+ *
+ * Control-Flow Group Generation
+ * =============================
+ *
+ * This transform will insert groups inside of the bodies of Composable functions
+ * depending on the control-flow structures that exist inside of them.
+ *
+ * There are 3 types of groups in Compose:
+ *
+ * 1. Replaceable Groups
+ * 2. Movable Groups
+ * 3. Restart Groups
+ *
+ * Generally speaking, every composable function *must* emit a single group when it executes.
+ * Every group can have any number of children groups. Additionally, we analyze each executable
+ * block and apply the following rules:
+ *
+ * 1. If a block executes exactly 1 time always, no groups are needed
+ * 2. If a set of blocks are such that exactly one of them is executed exactly once (for example,
+ * the result blocks of a when clause), then we insert a replaceable group around each block.
+ * 3. A movable group is only needed if the immediate composable call in the group has a Pivotal
+ * property.
+ *
+ * Default Arguments
+ * =================
+ *
+ * Composable functions need to have the default expressions executed inside of the group of the
+ * function. In order to accomplish this, composable functions handle default arguments
+ * themselves, instead of using the default handling of kotlin. This is also a win because we can
+ * handle the default arguments without generating an additional function since we do not need to
+ * worry about callers from java. Generally speaking though, compose handles default arguments
+ * similarly to kotlin in that we generate a $default bitmask parameter which maps each parameter
+ * index to a bit on the int. A value of "1" for a given parameter index indicated that that
+ * value was *not* provided at the callsite, and the default expression should be used instead.
+ *
+ *     @Composable fun A(x: Int = 0) {
+ *       f(x)
+ *     }
+ *
+ * gets transformed into
+ *
+ *     @Composable fun A(x: Int, $default: Int) {
+ *       val x = if ($default and 0b1 != 0) 0 else x
+ *       f(x)
+ *     }
+ *
+ * Note: This transform requires [ComposerParamTransformer] to also be run in order to work
+ * properly.
+ *
+ * Composable Function Skipping
+ * ============================
+ *
+ * Composable functions can "skip" their execution if certain conditions are met. This is done by
+ * appealing to the composer and storing previous values of functions and determining if we can
+ * skip based on whether or not they have changed.
+ *
+ *     @Composable fun A(x: Int) {
+ *       f(x)
+ *     }
+ *
+ * gets transformed into
+ *
+ *     @Composable fun A(x: Int, $composer: Composer<*>, $changed: Int) {
+ *       var $dirty = $changed
+ *       if ($changed and 0b0110 === 0) {
+ *         $dirty = $dirty or if ($composer.changed(x)) 0b0010 else 0b0100
+ *       }
+ *      if (%dirty and 0b1011 !== 0b1010 || !$composer.skipping) {
+ *        f(x)
+ *      } else {
+ *        $composer.skipToGroupEnd()
+ *      }
+ *     }
+ *
+ * Note that this makes use of bitmasks for the $changed and $dirty values. These bitmasks work
+ * in a different bit-space than the $default bitmask because two bits are needed to hold the
+ * four different possible states of each parameter. Additionally, the lowest bit of the bitmask
+ * is a special bit which forces execution of the function.
+ *
+ * This means that for the ith parameter of a composable function, the bit range of i*2 + 1 to
+ * i*2 + 2 are used to store the state of the parameter.
+ *
+ * The states are outlines by the [ParamState] class.
+ *
+ * Comparison Propagation
+ * ======================
+ *
+ * Because we detect changes in parameters of composable functions and have that data available
+ * in the body of a composable function, if we pass values to another composable function, it
+ * makes sense for us to pass on whatever information about that value we can determine at the
+ * time. This type of propagation of information through composable functions is called
+ * Comparison Propagation.
+ *
+ * Essentially, this comes down to us passing in useful values into the `$changed` parameter of
+ * composable functions.
+ *
+ * When a composable function executes, we have the current known states of all of the function's
+ * parameters in the $dirty variable. We can take bits off of this variable and pass them into a
+ * composable function in order to tell that function what we know.
+ *
+ *     @Composable fun A(x: Int) {
+ *       B(x, 123)
+ *     }
+ *
+ * gets transformed into
+ *
+ *     @Composable fun A(x: Int, $composer: Composer<*>, $changed: Int) {
+ *       var $dirty = ...
+ *       // ...
+ *       B(
+ *           x,
+ *           123,
+ *           $composer,
+ *           (0b110 and $dirty) or   // 1st param has same state that our 1st param does
+ *           0b11000                 // 2nd parameter is "static"
+ *       )
+ *     }
+ *
+ * Recomposability
+ * ===============
+ *
+ * Restartable composable functions get wrapped with "restart groups". Restart groups are like
+ * other groups except the end call is more complicated, as it returns a null value if and
+ * only if a subscription to that scope could not have occurred. If the value returned is
+ * non-null, we generate a lambda that teaches the runtime how to "restart" that group. At a high
+ * level, this transform comes down to:
+ *
+ *     @Composable fun A(x: Int) {
+ *       f(x)
+ *     }
+ *
+ * getting transformed into
+ *
+ *     @Composable fun A(x: Int, $composer: Composer<*>, $changed: Int) {
+ *       $composer.startRestartGroup()
+ *       // ...
+ *       f(x)
+ *       $composer.endRestartGroup()?.updateScope { next -> A(x, next, $changed or 0b1) }
+ *     }
+ *
+ * Source information
+ * ==================
+ * To enable Android Studio and similar tools to inspect a composition, source information is
+ * optionally generated into the source to indicate where call occur in a block. The first group
+ * of every function is also marked to correspond to indicate that the group corresponds to a call
+ * and the source location of the caller can be determined from the containing group.
+ */
+```
+主要介绍了对Composable的处理，对Compoeable函数分为:可替换组、可移动组、重新启动组，且根据组和参数的情况，对字节码进行操作，生成一些Composable，内容很多，我们以后再分析。先看看重点：
+ ```kotlin
+  *
+ *     @Composable fun A(x: Int = 0) {
+ *       f(x)
+ *     }
+ *
+ * gets transformed into
+ *
+ *     @Composable fun A(x: Int, $default: Int) {
+ *       val x = if ($default and 0b1 != 0) 0 else x
+ *       f(x)
+ *     }
+ ```
+ 对于这种**有默认参数的Composable函数，编译生成的是没有Composer参数的**，调用插件化时注意闭坑啊。
+## 最后
+如果文内或源码有错误，欢迎大家指正和批评。<br/>ps:走过路过的朋友，动动你们发财的小手，点赞支持，点点关注啊。😁
