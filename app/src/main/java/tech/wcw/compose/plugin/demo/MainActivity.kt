@@ -88,9 +88,9 @@ class MainActivity : ComponentActivity() {
             if (applyV1Success) {
                 //参数2 用于参数比较和跳过重组，后续单开一篇博文介绍这个参数
                 val start = System.currentTimeMillis()
-                pluginV1Method!!.invoke(pluginV1Obj, param, currentComposer, 0b000)
+                pluginV1Method!!.invoke(pluginV1Obj, param, currentComposer, 0)
                 Log.i(tag, "PluginV1 插件invoke耗时 ${System.currentTimeMillis() - start}")
-                pluginV1Method2!!.invoke(pluginV1Obj, currentComposer, 0b000)
+                pluginV1Method2!!.invoke(pluginV1Obj, currentComposer, 0)
 
 
             }
